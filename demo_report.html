@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MongoDB Memory Leak Analysis Report</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #333;
+        }
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            overflow: hidden;
+        }
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        .header h1 {
+            margin: 0;
+            font-size: 2.5em;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
+        }
+        .header p {
+            margin: 10px 0 0 0;
+            opacity: 0.9;
+        }
+        .nav {
+            background: #f8f9fa;
+            padding: 15px 30px;
+            border-bottom: 2px solid #e9ecef;
+            overflow-x: auto;
+            white-space: nowrap;
+        }
+        .nav button {
+            background: white;
+            border: 2px solid #667eea;
+            color: #667eea;
+            padding: 10px 20px;
+            margin-right: 10px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+        .nav button:hover {
+            background: #667eea;
+            color: white;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(102,126,234,0.3);
+        }
+        .nav button.active {
+            background: #667eea;
+            color: white;
+        }
+        .content {
+            padding: 30px;
+        }
+        .section {
+            display: none;
+        }
+        .section.active {
+            display: block;
+            animation: fadeIn 0.5s;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .card {
+            background: #f8f9fa;
+            border-left: 4px solid #667eea;
+            padding: 20px;
+            margin-bottom: 20px;
+            border-radius: 5px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        .card h3 {
+            margin-top: 0;
+            color: #667eea;
+        }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        .stat-box {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+            box-shadow: 0 4px 10px rgba(102,126,234,0.3);
+        }
+        .stat-box h3 {
+            margin: 0;
+            font-size: 2em;
+        }
+        .stat-box p {
+            margin: 10px 0 0 0;
+            opacity: 0.9;
+        }
+        .finding {
+            background: white;
+            border: 1px solid #e9ecef;
+            padding: 15px;
+            margin-bottom: 10px;
+            border-radius: 5px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+            overflow-x: auto;
+        }
+        .finding .offset {
+            color: #6c757d;
+            font-weight: bold;
+        }
+        .finding .value {
+            color: #28a745;
+        }
+        .credential {
+            background: #fff3cd;
+            border-left: 4px solid #ffc107;
+            padding: 15px;
+            margin-bottom: 10px;
+            border-radius: 5px;
+        }
+        .credential strong {
+            color: #856404;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        table th {
+            background: #667eea;
+            color: white;
+            padding: 12px;
+            text-align: left;
+        }
+        table td {
+            padding: 10px;
+            border-bottom: 1px solid #e9ecef;
+        }
+        table tr:hover {
+            background: #f8f9fa;
+        }
+        .warning {
+            background: #f8d7da;
+            border-left: 4px solid #dc3545;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 5px;
+            color: #721c24;
+        }
+        pre {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 5px;
+            overflow-x: auto;
+            border: 1px solid #e9ecef;
+        }
+        .badge {
+            display: inline-block;
+            padding: 5px 10px;
+            background: #667eea;
+            color: white;
+            border-radius: 3px;
+            font-size: 0.85em;
+            margin-right: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔍 MongoDB Memory Leak Analysis Report</h1>
+            <p>CVE-2025-14847 Memory Dump Analysis - Generated by mongobleed analyzer</p>
+        </div>
+        
+        <div class="nav">
+            <button class="nav-btn active" onclick="showSection('内存布局分析')">内存布局分析</button>
+            <button class="nav-btn " onclick="showSection('凭证搜索')">凭证搜索</button>
+            <button class="nav-btn " onclick="showSection('BSON字段分析')">BSON字段分析</button>
+            <button class="nav-btn " onclick="showSection('字符串提取')">字符串提取</button>
+            <button class="nav-btn " onclick="showSection('JSON数据提取')">JSON数据提取</button>
+            <button class="nav-btn " onclick="showSection('邮箱地址提取')">邮箱地址提取</button>
+            <button class="nav-btn " onclick="showSection('IP地址提取')">IP地址提取</button>
+        </div>
+        
+        <div class="content">
+            <div class="section active" id="内存布局分析">
+                <h2>内存布局分析</h2>
+<div class="stats">
+<div class="stat-box"><h3>736</h3><p>总字节数</p></div>
+<div class="stat-box"><h3>38.9%</h3><p>空字节比例</p></div>
+<div class="stat-box"><h3>61.1%</h3><p>可打印字符</p></div>
+</div>
+<div class="card"><h3>最常见的4字节模式</h3><table>
+<tr><th>模式</th><th>出现次数</th></tr>
+<tr><td><code>00000000</code></td><td>50</td></tr>
+<tr><td><code>75736572</code></td><td>6</td></tr>
+<tr><td><code>6e616d65</code></td><td>6</td></tr>
+<tr><td><code>695f6b65</code></td><td>6</td></tr>
+<tr><td><code>00000070</code></td><td>5</td></tr>
+<tr><td><code>61737377</code></td><td>5</td></tr>
+<tr><td><code>6f726400</code></td><td>5</td></tr>
+<tr><td><code>0000656d</code></td><td>5</td></tr>
+<tr><td><code>61696c00</code></td><td>5</td></tr>
+<tr><td><code>00006170</code></td><td>5</td></tr>
+</table></div>
+            </div>
+            <div class="section " id="凭证搜索">
+                <h2>凭证搜索</h2>
+<div class="card"><h3>PASSWORDS <span class="badge">1</span></h3>
+<div class="credential">
+<strong>偏移 000456:</strong> <code>SuperSecret123!</code>
+</div>
+</div>
+<div class="card"><h3>USERNAMES <span class="badge">3</span></h3>
+<div class="credential">
+<strong>偏移 000440:</strong> <code>admin</code>
+</div>
+<div class="credential">
+<strong>偏移 000697:</strong> <code>admin&quot;,&quot;role&quot;:&quot;superadmin&quot;}</code>
+</div>
+<div class="credential">
+<strong>偏移 000589:</strong> <code>pass@localhost:27017/db</code>
+</div>
+</div>
+<div class="card"><h3>API_KEYS <span class="badge">1</span></h3>
+<div class="credential">
+<strong>偏移 000482:</strong> <code>sk-1234567890abcdef1234567890abcdef</code>
+</div>
+</div>
+<div class="card"><h3>TOKENS <span class="badge">1</span></h3>
+<div class="credential">
+<strong>偏移 000527:</strong> <code>eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.example</code>
+</div>
+</div>
+<div class="card"><h3>AWS_KEYS <span class="badge">1</span></h3>
+<div class="credential">
+<strong>偏移 000618:</strong> <code>AKIAIOSFODNN7EXAMPLE</code>
+</div>
+</div>
+<div class="card"><h3>MONGODB_URIS <span class="badge">1</span></h3>
+<div class="credential">
+<strong>偏移 000579:</strong> <code>mongodb://user:pass@localhost:27017/db</code>
+</div>
+</div>
+            </div>
+            <div class="section " id="BSON字段分析">
+                <h2>BSON字段分析</h2>
+<div class="stats">
+<div class="stat-box"><h3>32</h3><p>字段总数</p></div>
+<div class="stat-box"><h3>12</h3><p>唯一字段</p></div>
+</div>
+<div class="card"><h3>最常见的字段名</h3><table>
+<tr><th>字段名</th><th>出现次数</th></tr>
+<tr><td><code>username</code></td><td>5</td></tr>
+<tr><td><code>password</code></td><td>5</td></tr>
+<tr><td><code>email</code></td><td>5</td></tr>
+<tr><td><code>api_key</code></td><td>5</td></tr>
+<tr><td><code>token</code></td><td>5</td></tr>
+<tr><td><code>admin</code></td><td>1</td></tr>
+<tr><td><code>abcdef1234567890abcdef</code></td><td>1</td></tr>
+<tr><td><code>eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.example</code></td><td>1</td></tr>
+<tr><td><code>db</code></td><td>1</td></tr>
+<tr><td><code>AKIAIOSFODNN7EXAMPLE</code></td><td>1</td></tr>
+<tr><td><code>example.com</code></td><td>1</td></tr>
+<tr><td><code>test.org</code></td><td>1</td></tr>
+</table></div>
+            </div>
+            <div class="section " id="字符串提取">
+                <h2>字符串提取</h2>
+<div class="stats"><div class="stat-box"><h3>36</h3><p>找到的字符串</p></div></div>
+<div class="card"><h3>提取的字符串（前100个）</h3>
+<div class="finding">
+<span class="offset">[000000]</span> <span class="value">username</span>
+</div>
+<div class="finding">
+<span class="offset">[000019]</span> <span class="value">password</span>
+</div>
+<div class="finding">
+<span class="offset">[000038]</span> <span class="value">email</span>
+</div>
+<div class="finding">
+<span class="offset">[000054]</span> <span class="value">api_key</span>
+</div>
+<div class="finding">
+<span class="offset">[000072]</span> <span class="value">token</span>
+</div>
+<div class="finding">
+<span class="offset">[000088]</span> <span class="value">username</span>
+</div>
+<div class="finding">
+<span class="offset">[000107]</span> <span class="value">password</span>
+</div>
+<div class="finding">
+<span class="offset">[000126]</span> <span class="value">email</span>
+</div>
+<div class="finding">
+<span class="offset">[000142]</span> <span class="value">api_key</span>
+</div>
+<div class="finding">
+<span class="offset">[000160]</span> <span class="value">token</span>
+</div>
+<div class="finding">
+<span class="offset">[000176]</span> <span class="value">username</span>
+</div>
+<div class="finding">
+<span class="offset">[000195]</span> <span class="value">password</span>
+</div>
+<div class="finding">
+<span class="offset">[000214]</span> <span class="value">email</span>
+</div>
+<div class="finding">
+<span class="offset">[000230]</span> <span class="value">api_key</span>
+</div>
+<div class="finding">
+<span class="offset">[000248]</span> <span class="value">token</span>
+</div>
+<div class="finding">
+<span class="offset">[000264]</span> <span class="value">username</span>
+</div>
+<div class="finding">
+<span class="offset">[000283]</span> <span class="value">password</span>
+</div>
+<div class="finding">
+<span class="offset">[000302]</span> <span class="value">email</span>
+</div>
+<div class="finding">
+<span class="offset">[000318]</span> <span class="value">api_key</span>
+</div>
+<div class="finding">
+<span class="offset">[000336]</span> <span class="value">token</span>
+</div>
+<div class="finding">
+<span class="offset">[000352]</span> <span class="value">username</span>
+</div>
+<div class="finding">
+<span class="offset">[000371]</span> <span class="value">password</span>
+</div>
+<div class="finding">
+<span class="offset">[000390]</span> <span class="value">email</span>
+</div>
+<div class="finding">
+<span class="offset">[000406]</span> <span class="value">api_key</span>
+</div>
+<div class="finding">
+<span class="offset">[000424]</span> <span class="value">token</span>
+</div>
+<div class="finding">
+<span class="offset">[000440]</span> <span class="value">username: admin</span>
+</div>
+<div class="finding">
+<span class="offset">[000456]</span> <span class="value">password: SuperSecret123!</span>
+</div>
+<div class="finding">
+<span class="offset">[000482]</span> <span class="value">api_key: sk-1234567890abcdef1234567890abcdef</span>
+</div>
+<div class="finding">
+<span class="offset">[000527]</span> <span class="value">token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.example</span>
+</div>
+<div class="finding">
+<span class="offset">[000579]</span> <span class="value">mongodb://user:pass@localhost:27017/db</span>
+</div>
+<div class="finding">
+<span class="offset">[000618]</span> <span class="value">AKIAIOSFODNN7EXAMPLE</span>
+</div>
+<div class="finding">
+<span class="offset">[000639]</span> <span class="value">admin@example.com</span>
+</div>
+<div class="finding">
+<span class="offset">[000657]</span> <span class="value">user@test.org</span>
+</div>
+<div class="finding">
+<span class="offset">[000671]</span> <span class="value">192.168.1.100</span>
+</div>
+<div class="finding">
+<span class="offset">[000685]</span> <span class="value">10.0.0.50</span>
+</div>
+<div class="finding">
+<span class="offset">[000695]</span> <span class="value">{&quot;username&quot;:&quot;admin&quot;,&quot;role&quot;:&quot;superadmin&quot;}</span>
+</div>
+</div>
+            </div>
+            <div class="section " id="JSON数据提取">
+                <h2>JSON数据提取</h2>
+<div class="stats"><div class="stat-box"><h3>1</h3><p>JSON对象</p></div></div>
+<div class="card"><h3>提取的JSON数据</h3>
+<div class="finding">
+<strong>偏移 000695:</strong><br>
+<pre>{
+  &quot;username&quot;: &quot;admin&quot;,
+  &quot;role&quot;: &quot;superadmin&quot;
+}</pre>
+</div>
+</div>
+            </div>
+            <div class="section " id="邮箱地址提取">
+                <h2>邮箱地址提取</h2>
+<div class="stats"><div class="stat-box"><h3>2</h3><p>找到的项目</p></div></div>
+<div class="card"><h3>提取的数据</h3>
+<div class="finding">admin@example.com</div>
+<div class="finding">user@test.org</div>
+</div>
+            </div>
+            <div class="section " id="IP地址提取">
+                <h2>IP地址提取</h2>
+<div class="stats"><div class="stat-box"><h3>2</h3><p>找到的项目</p></div></div>
+<div class="card"><h3>提取的数据</h3>
+<div class="finding">10.0.0.50</div>
+<div class="finding">192.168.1.100</div>
+</div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        function showSection(sectionName) {
+            // 隐藏所有section
+            document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+            document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+            
+            // 显示选中的section
+            document.getElementById(sectionName).classList.add('active');
+            event.target.classList.add('active');
+        }
+    </script>
+</body>
+</html>
